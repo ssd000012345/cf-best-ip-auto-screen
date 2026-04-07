@@ -69,7 +69,6 @@ def test_ping(ip):
             cmd = ["ping", "-c", "2", "-W", "4", ip]
         else:
             cmd = ["ping", "-c", "2", "-W", "4", "-6", ip]
-        
         output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=10).decode()
         loss = 100.0
         latency = 9999.0
@@ -129,4 +128,10 @@ def main():
         f.write(f"# V2RayN实用 CF优选IP榜单 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"# 测试800个IP | 可用 {len(results)} 个\n\n")
         f.write("=== 综合最优 Top 30 (推荐直接用于V2RayN) ===\n")
-        for ip,
+        for ip, latency, loss, speed, score, family in top_ips:
+            f.write(f"{ip:<18} | {latency:>6.2f}ms | {loss:>5.1f}% | {speed:>6.2f} MB/s | {family}\n")
+
+    log(f"完成！输出 {len(top_ips)} 个可用IP")
+
+if __name__ == "__main__":
+    main()
