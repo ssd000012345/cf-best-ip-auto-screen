@@ -1,0 +1,46 @@
+name: CF 优选IP 每15分钟全指标自动筛选
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # 每15分钟运行一次（UTC 时间）
+  workflow_dispatch:
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25      # 防止单次超时
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install requests
+
+      - name: 运行 CF 优选IP 全指标筛选（官方 + 多第三方 + uouin）
+        run: python cf_ip_screen.py
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TZ: Asia/Shanghai
+
+      - name: 提交最新优选IP榜单
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add best_cf_ips.txt
+          git commit -m "📊 更新 Cloudflare 优选IP 榜单 $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes"
+          git push
+        continue-on-error: true
+
+      - name: 上传结果（Artifacts）
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cf-best-ips
+          path: best_cf_ips.txt
+          retention-days: 3
