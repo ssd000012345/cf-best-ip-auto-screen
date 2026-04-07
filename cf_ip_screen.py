@@ -115,7 +115,7 @@ def main():
     third_ips = load_third_party_ips()
     all_ips.update(third_ips)
 
-    test_ips = list(all_ips)[:1800]
+    test_ips = list(all_ips)[:1200]
     log(f"总测试IP数量: {len(test_ips)}")
 
     # 测试
