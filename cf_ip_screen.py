@@ -8,12 +8,11 @@ from datetime import datetime
 import os
 import ipaddress
 
-# 配置：输出日志带时间戳
 def log(msg):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {msg}")
 
-# 官方 Cloudflare IPv4 范围
+# 官方 Cloudflare IPv4 地址段
 CF_IPV4_RANGES = [
     "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
     "104.16.0.0/13", "104.24.0.0/14", "108.162.192.0/18",
@@ -22,16 +21,9 @@ CF_IPV4_RANGES = [
     "190.93.240.0/20", "197.234.240.0/22", "198.41.128.0/17"
 ]
 
-# 官方 Cloudflare IPv6 范围 (注意：GitHub Actions 默认不支持 IPv6，测速会跳过)
-CF_IPV6_RANGES = [
-    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32",
-    "2405:b500::/32", "2405:8100::/32", "2a06:98c0::/29"
-]
-
-# 第三方优选 IP 来源
+# 第三方 IP 接口源
 THIRD_PARTY_URLS = [
     "https://raw.githubusercontent.com/cmliu/WorkerVless2sub/main/addressesapi.txt",
-    "https://raw.githubusercontent.com/cmliu/WorkerVless2sub/main/addressesipv6api.txt",
     "https://addressesapi.090227.xyz/CloudFlareYes",
     "https://raw.githubusercontent.com/gslege/CloudflareIP/main/ipv4.txt",
     "https://raw.githubusercontent.com/sefinek/Cloudflare-IP-Ranges/main/lists/cloudflare_ips_raw.txt",
@@ -44,130 +36,125 @@ THIRD_PARTY_URLS = [
 
 def load_third_party_ips():
     ips = set()
-    log("正在从第三方接口获取 IP...")
+    log("正在从第三方接口获取 IPv4...")
     for url in THIRD_PARTY_URLS:
         try:
-            r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            if r.status_code != 200:
-                continue
-            # 通用匹配：寻找类似 IP 地址的字符串
-            found = re.findall(r'(?:\d{1,3}\.){3}\d{1,3}|(?:[a-fA-F0-9]{1,4}:){2,7}[a-fA-F0-9]{1,4}', r.text)
-            for ip in found:
-                if len(ip) > 6:
-                    ips.add(ip.strip())
-        except Exception as e:
-            log(f"读取接口 {url} 出错: {e}")
+            r = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200:
+                # 严格匹配 IPv4 格式，排除 IPv6
+                found = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', r.text)
+                for ip in found:
+                    # 简单校验合法性
+                    if not ip.startswith(('0', '127', '255')):
+                        ips.add(ip)
+        except:
+            continue
     return list(ips)
 
-def test_ping(ip):
-    """测试延迟和丢包，适配 Linux (GitHub Actions)"""
+def test_ip_performance(ip):
+    """
+    针对 GitHub Actions 优化的双重测试逻辑
+    """
+    latency = 9999.0
+    loss = 100.0
+    speed = 0.0
+    
+    # 步骤 1: 延迟测试
+    # 优先尝试系统 Ping
     try:
-        is_ipv6 = ":" in ip
-        # GitHub Actions Runner 通常没 IPv6，如果检测到是 IPv6 直接跳过
-        if is_ipv6:
-            return 8888.0, 100.0
-
-        # -c 2: 发送2个包; -W 2: 等待2秒
-        cmd = ["ping", "-c", "2", "-W", "2", ip]
+        cmd = ["ping", "-c", "2", "-i", "0.3", "-W", "2", ip]
         output = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode(errors='ignore')
         
-        # 使用正则表达式提取丢包率
         loss_match = re.search(r'(\d+)% packet loss', output)
         loss = float(loss_match.group(1)) if loss_match else 100.0
         
-        # 使用正则表达式提取平均延迟 (rtt min/avg/max/mdev)
-        latency_match = re.search(r'min/avg/max/mdev = [\d.]+/([\d.]+)/', output)
-        latency = float(latency_match.group(1)) if latency_match else 9999.0
-        
-        return round(latency, 2), round(loss, 1)
+        lat_match = re.search(r'min/avg/max/mdev = [\d.]+/([\d.]+)/', output)
+        latency = float(lat_match.group(1)) if lat_match else 9999.0
     except:
-        return 8888.0, 100.0
+        # 如果 Ping 报错（权限或环境问题），切换到 HTTP 探测
+        try:
+            start_t = time.time()
+            r = requests.get(f"http://{ip}/cdn-cgi/trace", timeout=2, headers={"Host": "speed.cloudflare.com"})
+            if r.status_code == 200:
+                latency = round((time.time() - start_t) * 1000, 2)
+                loss = 0.0
+        except:
+            pass
 
-def test_download_speed(ip):
-    """测试下载速度，带内存保护"""
-    try:
-        # IPv6 URL 需要加方括号
-        target = f"[{ip}]" if ":" in ip else ip
-        url = f"http://{target}/__down?bytes=10000000" # 10MB 测试
-        
-        start = time.time()
-        # stream=True 避免一次性载入内存，Host 头部是必须的
-        with requests.get(url, timeout=6, headers={"Host": "speed.cloudflare.com"}, stream=True) as r:
-            if r.status_code != 200:
-                return 0.0
-            content_length = 0
-            for chunk in r.iter_content(chunk_size=1024*512): # 每次读 512KB
-                content_length += len(chunk)
-                # 如果下载超过 8 秒，直接中断（太慢了没意义）
-                if time.time() - start > 8:
-                    break
-        
-        elapsed = time.time() - start
-        speed = (content_length / 1024 / 1024) / elapsed if elapsed > 0 else 0.0
-        return round(speed, 2)
-    except:
-        return 0.0
+    # 步骤 2: 速度测试 (仅对延迟低于 2500ms 的 IP 进行)
+    if latency < 2500:
+        try:
+            # 下载 5MB 测试数据
+            url = f"http://{ip}/__down?bytes=5000000"
+            start_t = time.time()
+            with requests.get(url, timeout=6, headers={"Host": "speed.cloudflare.com"}, stream=True) as r:
+                if r.status_code == 200:
+                    downloaded = 0
+                    for chunk in r.iter_content(chunk_size=1024*512):
+                        downloaded += len(chunk)
+                        if time.time() - start_t > 6: break # 超时强制停止
+                    
+                    duration = time.time() - start_t
+                    speed = (downloaded / 1024 / 1024) / duration if duration > 0 else 0.0
+        except:
+            speed = 0.0
+
+    return ip, round(latency, 2), round(loss, 1), round(speed, 2)
 
 def main():
-    log("CF 优选 IP 脚本开始运行...")
+    log("CF 优选 IP (纯净 IPv4 版) 启动...")
     all_ips = set()
     
-    # 1. 随机抽取官方 IP 段
-    for cidr_list in [CF_IPV4_RANGES]: # 考虑到 GitHub 环境，暂时只测 IPv4
-        for cidr in cidr_list:
-            try:
-                net = ipaddress.ip_network(cidr)
-                num_samples = 30 if net.num_addresses > 30 else net.num_addresses
-                # 随机选几个 IP
-                indices = random.sample(range(net.num_addresses), num_samples)
-                for i in indices:
-                    all_ips.add(str(net[i]))
-            except:
-                continue
-    
-    # 2. 加入第三方采集的 IP
+    # 1. 抽取官方 IPv4 段 IP (每个段抽 15 个，增加覆盖面)
+    for cidr in CF_IPV4_RANGES:
+        try:
+            net = ipaddress.ip_network(cidr)
+            samples = random.sample(range(net.num_addresses), min(15, net.num_addresses))
+            for i in samples:
+                all_ips.add(str(net[i]))
+        except: continue
+        
+    # 2. 加入第三方 IPv4
     third_ips = load_third_party_ips()
     all_ips.update(third_ips)
     
-    test_ips = list(all_ips)
-    random.shuffle(test_ips) # 打乱顺序
-    test_ips = test_ips[:800] # 限制测试 800 个 IP，防止 Action 运行超时
+    test_list = list(all_ips)
+    random.shuffle(test_list)
+    # 限制测试总数，防止 Action 运行时间过长被 GitHub 强制中断
+    test_list = test_list[:600] 
     
-    log(f"待测试 IP 总数: {len(test_ips)}")
-
+    log(f"待测试 IPv4 总数: {len(test_list)}")
+    
     results = []
-    # 使用 50 个并行线程进行测速
-    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
-        futures = {executor.submit(lambda i=ip: (i, *test_ping(i), test_download_speed(i))): ip for ip in test_ips}
+    # 维持 40-50 线程在 GitHub 环境较为稳定
+    with concurrent.futures.ThreadPoolExecutor(max_workers=45) as executor:
+        futures = [executor.submit(test_ip_performance, ip) for ip in test_list]
         for future in concurrent.futures.as_completed(futures):
             try:
-                ip, latency, loss, speed = future.result()
-                # 筛选掉完全不通或延迟极高的
-                if loss < 50 and latency < 1000:
-                    # 评分公式：延迟占 30%，丢包占 40%，速度占 30%
-                    # 速度越快分越低（这里是越小越排在前面）
-                    speed_score = (100 - speed * 10) if speed < 10 else 0
-                    score = latency * 0.3 + loss * 5.0 + speed_score * 0.5
-                    family = "IPv6" if ":" in ip else "IPv4"
-                    results.append((ip, latency, loss, speed, round(score, 2), family))
+                ip, lat, loss, speed = future.result()
+                # 记录所有能够跑通延迟的 IP
+                if lat < 9000:
+                    # 评分权重：主要看延迟和速度
+                    score = lat * 0.4 + loss * 15 + (100 - speed * 10)
+                    results.append((ip, lat, loss, speed, score))
             except:
                 continue
 
-    # 按评分排序 (从小到大)
+    # 按综合评分排序
     results.sort(key=lambda x: x[4])
-    top_ips = results[:30] # 取前 30 名
+    top_results = results[:30]
 
-    # 3. 输出到文件
-    output_file = "best_cf_ips.txt"
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write(f"# 更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"# 总共测试: {len(test_ips)} | 达标 IP: {len(results)}\n\n")
-        f.write(f"{'IP 地址':<20} | {'延迟':<8} | {'丢包':<5} | {'下载速度':<10} | {'类型'}\n")
-        f.write("-" * 65 + "\n")
-        for ip, latency, loss, speed, score, family in top_ips:
-            f.write(f"{ip:<20} | {latency:>6}ms | {loss:>4}% | {speed:>6} MB/s | {family}\n")
+    # 3. 写入文件
+    filename = "best_cf_ips.txt"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(f"# 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (UTC)\n")
+        f.write(f"# 环境: GitHub Actions | 测试总数: {len(test_list)} | 有效数量: {len(results)}\n\n")
+        f.write(f"{'IP地址':<18} | {'延迟':<8} | {'丢包':<5} | {'下载速度'}\n")
+        f.write("-" * 55 + "\n")
+        for ip, lat, loss, speed, _ in top_results:
+            f.write(f"{ip:<18} | {lat:>6}ms | {loss:>4}% | {speed:>6} MB/s\n")
 
-    log(f"成功！已将最优的 {len(top_ips)} 个 IP 保存到 {output_file}")
+    log(f"任务圆满完成！输出文件: {filename}")
 
 if __name__ == "__main__":
     main()
