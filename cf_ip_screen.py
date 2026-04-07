@@ -65,4 +65,68 @@ def load_third_party_ips():
 
 def test_ping(ip):
     try:
-        cmd = ["ping", "-c", "2", "-W", "4", ip] if ":" not in ip
+        if ":" not in ip:
+            cmd = ["ping", "-c", "2", "-W", "4", ip]
+        else:
+            cmd = ["ping", "-c", "2", "-W", "4", "-6", ip]
+        
+        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=10).decode()
+        loss = 100.0
+        latency = 9999.0
+        if "packet loss" in output.lower():
+            loss = float([line for line in output.splitlines() if "packet loss" in line][0].split("%")[0].split()[-1])
+        if ("rtt" in output.lower() or "avg" in output.lower()) and "ms" in output:
+            rtt_line = [line for line in output.splitlines() if ("rtt" in line.lower() or "avg" in line.lower()) and "ms" in line][0]
+            latency = float(rtt_line.split("/")[-3])
+        return round(latency, 2), round(loss, 1)
+    except:
+        return 8888.0, 85.0
+
+def test_download_speed(ip):
+    try:
+        url = f"http://{ip}/__down?bytes=8000000"
+        start = time.time()
+        r = requests.get(url, timeout=12, headers={"Host": "speed.cloudflare.com"})
+        elapsed = time.time() - start
+        speed = (len(r.content) / 1024 / 1024) / elapsed if elapsed > 0 else 0.0
+        return round(speed, 2)
+    except:
+        return 0.0
+
+def main():
+    log("V2RayN实用版 CF优选IP筛选启动 (每小时运行 - 800个IP)")
+    all_ips = set()
+    
+    for cidr_list in [CF_IPV4_RANGES, CF_IPV6_RANGES]:
+        for cidr in cidr_list:
+            try:
+                net = ipaddress.ip_network(cidr)
+                for _ in range(100):
+                    all_ips.add(str(net[random.randint(0, len(net)-1)]))
+            except:
+                pass
+    
+    third_ips = load_third_party_ips()
+    all_ips.update(third_ips)
+    
+    test_ips = list(all_ips)[:800]
+    log(f"总测试IP数量: {len(test_ips)}")
+
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=80) as executor:
+        futures = [executor.submit(lambda i=ip: (i, *test_ping(i), test_download_speed(i))) for ip in test_ips]
+        for future in concurrent.futures.as_completed(futures):
+            ip, latency, loss, speed = future.result()
+            if speed > 1.5 or latency < 650:
+                score = latency * 0.3 + loss * 2.0 + (100 - speed * 12 if speed > 0 else 180) * 0.6
+                family = "IPv6" if ":" in ip else "IPv4"
+                results.append((ip, latency, loss, speed, round(score, 2), family))
+
+    results.sort(key=lambda x: x[4])
+    top_ips = results[:30]
+
+    with open("best_cf_ips.txt", "w", encoding="utf-8") as f:
+        f.write(f"# V2RayN实用 CF优选IP榜单 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"# 测试800个IP | 可用 {len(results)} 个\n\n")
+        f.write("=== 综合最优 Top 30 (推荐直接用于V2RayN) ===\n")
+        for ip,
