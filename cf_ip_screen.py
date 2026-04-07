@@ -11,7 +11,6 @@ def log(msg):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {msg}")
 
-# 1. 官方 Cloudflare IPv4 网段
 CF_IPV4_RANGES = [
     "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
     "104.16.0.0/13", "104.24.0.0/14", "108.162.192.0/18",
@@ -20,24 +19,28 @@ CF_IPV4_RANGES = [
     "190.93.240.0/20", "197.234.240.0/22", "198.41.128.0/17"
 ]
 
-# 2. 增强后的第三方接口列表
 THIRD_PARTY_URLS = [
     "https://api.uouin.com/cloudflare.html",
-    "https://www.wetest.vip/page/cloudflare/address_v4.html", # 你要求加入的
+    "https://www.wetest.vip/page/cloudflare/address_v4.html",
     "https://raw.githubusercontent.com/cmliu/WorkerVless2sub/main/addressesapi.txt",
-    "https://addressesapi.090227.xyz/CloudFlareYes",
-    "https://raw.githubusercontent.com/gslege/CloudflareIP/main/ipv4.txt",
-    "https://raw.githubusercontent.com/sefinek/Cloudflare-IP-Ranges/main/lists/cloudflare_ips_raw.txt",
-    "https://cf.090227.xyz/bestip",
-    "https://raw.githubusercontent.com/ircfspace/cf-ip-ranges/main/export.ipv4"
+    "https://cf.090227.xyz/bestip"
 ]
 
+def fix_ip(ip):
+    """
+    如果 IP 以 .0 结尾，将其转换为该段内随机的一个有效 IP (1-254)
+    """
+    if ip.endswith(".0"):
+        prefix = ".".join(ip.split(".")[:-1])
+        return f"{prefix}.{random.randint(1, 254)}"
+    return ip
+
 def test_ip_latency(ip):
-    """使用 HTTP 探测延迟，这种方式在 GitHub Actions 最稳"""
     try:
+        # 再次确保测试的是具体 IP 而不是网段
+        ip = fix_ip(ip)
         start_t = time.time()
-        # 增加 headers 模拟浏览器，防止被 CF 拦截
-        r = requests.get(f"http://{ip}/cdn-cgi/trace", timeout=3, headers={"Host": "speed.cloudflare.com", "User-Agent": "Mozilla/5.0"})
+        r = requests.get(f"http://{ip}/cdn-cgi/trace", timeout=3, headers={"Host": "speed.cloudflare.com"})
         if r.status_code == 200:
             latency = (time.time() - start_t) * 1000
             return ip, round(latency, 2)
@@ -46,47 +49,37 @@ def test_ip_latency(ip):
     return ip, 9999.0
 
 def main():
-    log("全指标筛选启动 (官方网段 + 增强第三方)...")
-    
+    log("全指标筛选启动 (修复 .0 结尾问题)...")
     all_ips = set()
 
-    # --- 第一步：强制抽取官方网段 IP ---
-    log("正在从官方网段随机抽样...")
+    # 1. 官方网段随机抽样 (避开 .0)
     for cidr in CF_IPV4_RANGES:
         try:
             net = ipaddress.ip_network(cidr)
-            # 每个官方子网随机抽取 30 个 IP，确保覆盖面
-            sample_size = min(30, net.num_addresses)
-            indices = random.sample(range(net.num_addresses), sample_size)
-            for i in indices:
-                all_ips.add(str(net[i]))
-        except Exception as e:
-            continue
-    log(f"官方网段贡献了 {len(all_ips)} 个基础 IP")
+            # 随机抽 50 个地址
+            for _ in range(50):
+                # 随机生成主机地址，ipaddress 库会自动避开网段首尾
+                random_ip = str(net.network_address + random.randint(1, net.num_addresses - 2))
+                all_ips.add(random_ip)
+        except: continue
 
-    # --- 第二步：抓取第三方接口 ---
+    # 2. 抓取第三方接口并修正
     for url in THIRD_PARTY_URLS:
         try:
-            r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-            if r.status_code == 200:
-                found = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', r.text)
-                before_count = len(all_ips)
-                for ip in found:
-                    if not ip.startswith(('10.', '192.', '127.', '0.')):
-                        all_ips.add(ip)
-                log(f"接口 {url[:30]}... 贡献了 {len(all_ips) - before_count} 个新 IP")
-        except:
-            log(f"接口 {url[:30]}... 访问超时")
+            r = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+            found = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', r.text)
+            for ip in found:
+                if not ip.startswith(('10.', '192.', '127.')):
+                    all_ips.add(fix_ip(ip)) # 抓到 .0 自动修正
+        except: continue
             
     test_list = list(all_ips)
     random.shuffle(test_list)
-    # GitHub Actions 建议测试 1500 个以内，否则容易超时挂掉
-    test_list = test_list[:1500]
+    test_list = test_list[:1500] 
     
-    log(f"去重后总待测 IP: {len(test_list)} 个")
+    log(f"待测具体有效 IP 总数: {len(test_list)} 个")
     
     results = []
-    # 增加并发到 80，GitHub 机器性能足够处理
     with concurrent.futures.ThreadPoolExecutor(max_workers=80) as executor:
         futures = [executor.submit(test_ip_latency, ip) for ip in test_list]
         for future in concurrent.futures.as_completed(futures):
@@ -94,20 +87,16 @@ def main():
             if lat < 4000:
                 results.append((ip, lat))
 
-    # 排序
     results.sort(key=lambda x: x[1])
-    top_results = results[:100]
-
-    # --- 第三步：输出文件 ---
+    
     with open("best_cf_ips.txt", "w", encoding="utf-8") as f:
-        f.write(f"# 优选榜单 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"# 待测总数: {len(test_list)} | 连通数量: {len(results)}\n\n")
+        f.write(f"# 优选榜单 (已修复 .0 结尾无效 IP) - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         f.write(f"{'IP地址':<18} | {'HTTP延迟'}\n")
         f.write("-" * 35 + "\n")
-        for ip, lat in top_results:
+        for ip, lat in results[:100]:
             f.write(f"{ip:<18} | {lat:>6} ms\n")
 
-    log(f"任务结束，共保存 {len(top_results)} 个 IP 到文件")
+    log("任务结束，已过滤并修正网段地址。")
 
 if __name__ == "__main__":
     main()
