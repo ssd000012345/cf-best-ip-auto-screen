@@ -2,7 +2,7 @@ name: CF 优选IP 每15分钟全指标自动筛选
 
 on:
   schedule:
-    - cron: '*/15 * * * *'   # 每15分钟运行一次（UTC 时间）
+    - cron: '0 */2 * * *'   # 每2小时运行一次（UTC 时间）
   workflow_dispatch:
 
 jobs:
