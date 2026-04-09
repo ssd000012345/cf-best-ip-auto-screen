@@ -1,4 +1,4 @@
-name: CF 优选IP 每15分钟全指标自动筛选
+name: CF 优选IP 每2小时全指标自动筛选
 
 on:
   schedule:
